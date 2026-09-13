@@ -1,6 +1,8 @@
 #include<iostream>
 #include<vector>
 #include<cmath>
+#include<cstdlib>
+#include<utility>
 #include<glad/glad.h>
 #include<GLFW/glfw3.h>
 
@@ -17,8 +19,9 @@ const char* vertexShaderSource = "#version 330 core\n"
 
 // ------------------------------------------------------------------
 // Fragment Shader
-// Usa un "uniform" de color (uColor) en vez de un color fijo, para
-// poder reutilizar el mismo shader con distintos colores mas adelante.
+// Ahora usa un "uniform" de color (uColor) en vez de un color fijo,
+// asi podemos pintar la grilla y la diagonal con colores distintos
+// usando el MISMO shader program.
 // ------------------------------------------------------------------
 const char* fragmentShaderSource = "#version 330 core\n"
 "out vec4 FragColor;\n"
@@ -105,6 +108,77 @@ void generarGrilla(int width, int height, std::vector<GLfloat>& outVertices)
 }
 
 // ------------------------------------------------------------------
+// ALGORITMO DE BRESENHAM (version generalizada, sirve para cualquier
+// pendiente/octante). Va de la celda (x0,y0) a la celda (x1,y1) de la
+// grilla, usando SOLO enteros: nada de floats, nada de division.
+//
+// "err" es el termino de error acumulado: en cada paso nos dice si
+// conviene avanzar en X, en Y, o en ambos, para quedarnos lo mas
+// cerca posible de la linea real, sin necesidad de recalcular nada
+// desde cero (es incremental, como pide el algoritmo original).
+// ------------------------------------------------------------------
+void bresenham(int x0, int y0, int x1, int y1, std::vector<std::pair<int, int>>& celdas)
+{
+    int dx = std::abs(x1 - x0);
+    int dy = -std::abs(y1 - y0);
+    int sx = (x0 < x1) ? 1 : -1; // direccion en X (avanza o retrocede)
+    int sy = (y0 < y1) ? 1 : -1; // direccion en Y (avanza o retrocede)
+    int err = dx + dy;           // termino de error inicial
+
+    int x = x0, y = y0;
+    while (true)
+    {
+        celdas.push_back({ x, y });
+        if (x == x1 && y == y1) break;
+
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x += sx; } // avanza en X
+        if (e2 <= dx) { err += dx; y += sy; } // avanza en Y
+    }
+}
+
+// ------------------------------------------------------------------
+// Genera la diagonal usando Bresenham sobre las celdas de la grilla
+// (columna, fila) y RELLENA cada celda que el algoritmo va marcando
+// (2 triangulos por celda). Va de la celda superior izquierda a la
+// inferior derecha.
+// ------------------------------------------------------------------
+void generarDiagonalRellena(int width, int height, std::vector<GLfloat>& outVertices)
+{
+    outVertices.clear();
+
+    int columnas = static_cast<int>(width / gridSpacingPixels);
+    int filas = static_cast<int>(height / gridSpacingPixels);
+    if (columnas <= 0 || filas <= 0) return;
+
+    // Celdas que recorre la diagonal, calculadas con Bresenham
+    std::vector<std::pair<int, int>> celdas;
+    bresenham(0, 0, columnas - 1, filas - 1, celdas);
+
+    for (const auto& celda : celdas)
+    {
+        int i = celda.first;  // columna
+        int fila = celda.second;
+
+        // Esquinas de la celda (columna i, fila) en pixeles
+        float px0 = i * gridSpacingPixels;
+        float px1 = (i + 1) * gridSpacingPixels;
+        float py0 = fila * gridSpacingPixels;
+        float py1 = (fila + 1) * gridSpacingPixels;
+
+        // Conversion de pixeles a NDC (origen de pixeles arriba-izquierda)
+        float x0 = (px0 / width) * 2.0f - 1.0f;
+        float x1 = (px1 / width) * 2.0f - 1.0f;
+        float y0 = 1.0f - (py1 / height) * 2.0f; // borde inferior de la celda
+        float y1 = 1.0f - (py0 / height) * 2.0f; // borde superior de la celda
+
+
+        // La celda completa, rellena con 2 triangulos
+        agregarQuad(outVertices, x0, y0, x1, y1);
+    }
+}
+
+// ------------------------------------------------------------------
 // Callback que GLFW llama automaticamente cada vez que la ventana
 // cambia de tamaño (maximizar, arrastrar el borde, etc).
 // Aqui es donde "reajustamos" el viewport y guardamos el nuevo
@@ -171,7 +245,7 @@ int main()
     // ----------------------------------------------------------------
     // NOTA: el codigo original dibujaba un triangulo fijo (vertices,
     // indices, EBO). Se deja comentado porque no corresponde al
-    // pedido de la grilla.
+    // pedido de la grilla + diagonal.
     // ----------------------------------------------------------------
     /*
     GLfloat vertices[] =
@@ -211,6 +285,26 @@ int main()
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
+    // ----------------------------------------------------------------
+    // VAO/VBO de la DIAGONAL, ahora hecha rellenando celdas enteras de
+    // la grilla (no un rectangulo angosto aparte). GL_DYNAMIC_DRAW
+    // porque las celdas que le tocan cambian al redimensionar.
+    // ----------------------------------------------------------------
+    GLuint diagVAO, diagVBO;
+    glGenVertexArrays(1, &diagVAO);
+    glGenBuffers(1, &diagVBO);
+
+    std::vector<GLfloat> diagonalVertices;
+    generarDiagonalRellena(windowWidth, windowHeight, diagonalVertices);
+
+    glBindVertexArray(diagVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, diagVBO);
+    glBufferData(GL_ARRAY_BUFFER, diagonalVertices.size() * sizeof(GLfloat), diagonalVertices.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
     glClearColor(0.07f, 0.13f, 0.17f, 1.0f);//color del fondo
 
     // Guardamos el ancho/alto con el que se genero la grilla actual,
@@ -232,6 +326,15 @@ int main()
             glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(GLfloat), gridVertices.data(), GL_DYNAMIC_DRAW);
             glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+            // La diagonal tambien se recalcula: al cambiar el tamaño,
+            // cambian las columnas/filas y por lo tanto que celdas
+            // hay que rellenar para seguir la diagonal.
+            generarDiagonalRellena(windowWidth, windowHeight, diagonalVertices);
+
+            glBindBuffer(GL_ARRAY_BUFFER, diagVBO);
+            glBufferData(GL_ARRAY_BUFFER, diagonalVertices.size() * sizeof(GLfloat), diagonalVertices.data(), GL_DYNAMIC_DRAW);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+
             lastWidth = windowWidth;
             lastHeight = windowHeight;
         }
@@ -247,6 +350,12 @@ int main()
         glBindVertexArray(gridVAO);
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(gridVertices.size() / 3));
 
+        // --- Dibuja la diagonal (color naranja) rellenando las celdas
+        // de la grilla que le corresponden: son puros triangulos ---
+        glUniform4f(colorLoc, 0.9f, 0.4f, 0.1f, 1.0f);
+        glBindVertexArray(diagVAO);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(diagonalVertices.size() / 3));
+
         glfwSwapBuffers(window);
         glfwPollEvents();//se encarga de todos los eventos de GLFW
     }
@@ -254,6 +363,8 @@ int main()
     //borra todos los objetos creados
     glDeleteVertexArrays(1, &gridVAO);
     glDeleteBuffers(1, &gridVBO);
+    glDeleteVertexArrays(1, &diagVAO);
+    glDeleteBuffers(1, &diagVBO);
     glDeleteProgram(shaderProgram);
 
     glfwDestroyWindow(window);//Borra la ventana antes de cerrar el programa
